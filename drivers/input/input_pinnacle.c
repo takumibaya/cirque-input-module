@@ -372,6 +372,10 @@ static void pinnacle_report_data_abs(const struct device *dev) {
     int ret = pinnacle_read_abs(dev);
     if (ret == 0) {
         pinnacle_send_abs(dev);
+    } else {
+        // Ensure interrupt is re-enabled on error to prevent deadlock
+        pinnacle_clear_status(dev);
+        set_int(dev, true);
     }
 }
 
@@ -391,6 +395,10 @@ static void pinnacle_report_data_abs_rel(const struct device *dev) {
         dy /= config->abs_rel_divisor;
 
         pinnacle_send_rel(dev, (int8_t) dx, (int8_t) dy);
+    } else {
+        // Ensure interrupt is re-enabled on error to prevent deadlock
+        pinnacle_clear_status(dev);
+        set_int(dev, true);
     }
 }
 
@@ -400,6 +408,9 @@ static void pinnacle_report_data_rel(const struct device *dev) {
     ret = pinnacle_seq_read(dev, PINNACLE_STATUS1, packet, 1);
     if (ret < 0) {
         LOG_ERR("read status: %d", ret);
+        // Ensure interrupt is re-enabled on error to prevent deadlock
+        pinnacle_clear_status(dev);
+        set_int(dev, true);
         return;
     }
 
@@ -407,11 +418,17 @@ static void pinnacle_report_data_rel(const struct device *dev) {
 
     // Ignore 0xFF packets that indicate communcation failure, or if SW_DR isn't asserted
     if (packet[0] == 0xFF || !(packet[0] & PINNACLE_STATUS1_SW_DR)) {
+        // Ensure interrupt is re-enabled to prevent deadlock
+        pinnacle_clear_status(dev);
+        set_int(dev, true);
         return;
     }
     ret = pinnacle_seq_read(dev, PINNACLE_2_2_PACKET0, packet, 3);
     if (ret < 0) {
         LOG_ERR("read packet: %d", ret);
+        // Ensure interrupt is re-enabled on error to prevent deadlock
+        pinnacle_clear_status(dev);
+        set_int(dev, true);
         return;
     }
 

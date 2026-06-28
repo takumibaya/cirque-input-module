@@ -27,6 +27,11 @@ static int pinnacle_write(const struct device *dev, const uint8_t addr, const ui
 #define NUM_ZIDLE  3
 #define NUM_ZIDLE_PAD 2
 
+// Bound the ERA control-register poll loops so a wedged controller can never hang
+// the init/resume path forever (was an unbounded do-while). On timeout we bail with
+// -EIO instead of spinning, letting the caller log and recover.
+#define PINNACLE_ERA_MAX_POLL 100
+
 #if DT_ANY_INST_ON_BUS_STATUS_OKAY(i2c)
 
 static int pinnacle_i2c_seq_read(const struct device *dev, const uint8_t addr, uint8_t *buf,
@@ -164,11 +169,17 @@ static int pinnacle_era_read(const struct device *dev, const uint16_t addr, uint
     }
 
     uint8_t control_val;
+    int era_poll = 0;
     do {
 
         ret = pinnacle_seq_read(dev, PINNACLE_REG_ERA_CONTROL, &control_val, 1);
         if (ret < 0) {
             LOG_ERR("Failed to read ERA control (%d)", ret);
+            return -EIO;
+        }
+
+        if (++era_poll >= PINNACLE_ERA_MAX_POLL) {
+            LOG_ERR("ERA control poll timed out");
             return -EIO;
         }
 
@@ -218,11 +229,17 @@ static int pinnacle_era_write(const struct device *dev, const uint16_t addr, uin
     }
 
     uint8_t control_val;
+    int era_poll = 0;
     do {
 
         ret = pinnacle_seq_read(dev, PINNACLE_REG_ERA_CONTROL, &control_val, 1);
         if (ret < 0) {
             LOG_ERR("Failed to read ERA control (%d)", ret);
+            return -EIO;
+        }
+
+        if (++era_poll >= PINNACLE_ERA_MAX_POLL) {
+            LOG_ERR("ERA control poll timed out");
             return -EIO;
         }
 
@@ -249,7 +266,7 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
         for (int i = 0; i < 3; i++) {
             uint8_t btn_val = btn & BIT(i);
             if (btn_val != (data->btn_cache & BIT(i))) {
-                input_report_key(dev, INPUT_BTN_0 + i, btn_val ? 1 : 0, false, K_FOREVER);
+                input_report_key(dev, INPUT_BTN_0 + i, btn_val ? 1 : 0, false, K_NO_WAIT);
                 must_send = true;
             }
         }
@@ -260,20 +277,28 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
     bool touch_changed = false;
     if(is_touching) {
         must_send = true;
+        data->num_z_idle = 0;
 
-        if(data->num_z_idle > 0) { // we just recently had z idles
+        if(!data->touch_active) { // transition from idle -> touching = new press
+            data->touch_active = true;
             touch_changed = true;
-            data->num_z_idle = 0;
             dx = 0;
             dy = 0; // starting a new press, must reset deltas
         }
     } else {
-        data->num_z_idle++;
-        if(data->num_z_idle == NUM_ZIDLE) {
-            touch_changed = true;
-        }
         dx = 0;
         dy = 0;
+        if(data->touch_active) { // only count idles while a press is outstanding
+            data->num_z_idle++;
+            // Use >= (not ==) plus the touch_active latch so that a missed z-idle
+            // packet (the controller occasionally drops one - see NUM_ZIDLE comment)
+            // can never permanently skip the BTN_TOUCH release and leave a momentary
+            // layer (e.g. &mo via touch_processor) stuck on. Release fires exactly once.
+            if(data->num_z_idle >= NUM_ZIDLE) {
+                data->touch_active = false;
+                touch_changed = true;
+            }
+        }
     }
 
     LOG_DBG("Rel move: touch_changed=%d z=%d dx=%d dy=%d", touch_changed, data->last_z, dx, dy);
@@ -281,13 +306,13 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
     if(touch_changed)
     {
         // Finalize the input event only if we have something to report
-        input_report_key(dev, INPUT_BTN_TOUCH, is_touching ? 1 : 0, false, K_FOREVER);
+        input_report_key(dev, INPUT_BTN_TOUCH, is_touching ? 1 : 0, false, K_NO_WAIT);
         must_send = true;
     }
 
     if(must_send) {
-        input_report_rel(dev, INPUT_REL_X, dx, false, K_FOREVER);
-        input_report_rel(dev, INPUT_REL_Y, dy, true, K_FOREVER); 
+        input_report_rel(dev, INPUT_REL_X, dx, false, K_NO_WAIT);
+        input_report_rel(dev, INPUT_REL_Y, dy, true, K_NO_WAIT); 
     }
 }
 
@@ -307,7 +332,7 @@ static void pinnacle_send_abs(const struct device *dev) {
         for (int i = 0; i < 3; i++) {
             uint8_t btn_val = btn & BIT(i);
             if (btn_val != (data->btn_cache & BIT(i))) {
-                input_report_key(dev, INPUT_BTN_0 + i, btn_val ? 1 : 0, false, K_FOREVER);
+                input_report_key(dev, INPUT_BTN_0 + i, btn_val ? 1 : 0, false, K_NO_WAIT);
             }
         }
     }
@@ -330,8 +355,8 @@ static void pinnacle_send_abs(const struct device *dev) {
         x = ((x - config->absolute_mode_clamp_min_x) * config->absolute_mode_scale_to_width) / (config->absolute_mode_clamp_max_x - config->absolute_mode_clamp_min_x);
         y = ((y - config->absolute_mode_clamp_min_y) * config->absolute_mode_scale_to_height) / (config->absolute_mode_clamp_max_y - config->absolute_mode_clamp_min_y);
 
-        input_report_abs(dev, INPUT_ABS_X, x, false, K_FOREVER);
-        input_report_abs(dev, INPUT_ABS_Y, y, true, K_FOREVER);
+        input_report_abs(dev, INPUT_ABS_X, x, false, K_NO_WAIT);
+        input_report_abs(dev, INPUT_ABS_Y, y, true, K_NO_WAIT);
     }
 
     return;

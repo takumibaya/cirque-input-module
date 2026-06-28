@@ -78,6 +78,7 @@ struct pinnacle_data {
     uint8_t last_btn; // the current button reading
     int8_t last_z;
     int8_t num_z_idle;
+    bool touch_active; // latched touch state: true between BTN_TOUCH press and release
     int16_t last_x, last_y; // last abs reading
 
     const struct device *dev;

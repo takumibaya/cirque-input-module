@@ -369,8 +369,9 @@ static void pinnacle_send_abs(const struct device *dev) {
 
 // abs-rel mode with aux-abs-code: after the REL frame of a touching sample, report the
 // same sample's scaled position as one EV_ABS event, value = x | (y << 11), sync = false.
-// The first sample of a contact is always sent, later ones at most every
-// aux-abs-interval-ms. A failed (queue full) report is retried with the next sample.
+// The first sample of a contact is always sent; later ones at most every
+// aux-abs-interval-ms and, with aux-abs-on-change, only when the scaled position differs
+// from the last one sent. A failed (queue full) report is retried with the next sample.
 static void pinnacle_send_aux(const struct device *dev, bool contact_start) {
     const struct pinnacle_config *config = dev->config;
     struct pinnacle_data *data = dev->data;
@@ -383,9 +384,14 @@ static void pinnacle_send_aux(const struct device *dev, bool contact_start) {
     int16_t x = data->last_x;
     int16_t y = data->last_y;
     pinnacle_scale_abs(config, &x, &y);
+    const int32_t value = x | (y << 11);
 
-    if (input_report_abs(dev, config->aux_abs_code, x | (y << 11), false, K_NO_WAIT) == 0) {
+    if (!contact_start && config->aux_abs_on_change && value == data->aux_last_value) {
+        return;
+    }
+    if (input_report_abs(dev, config->aux_abs_code, value, false, K_NO_WAIT) == 0) {
         data->aux_last_ms = now;
+        data->aux_last_value = value;
     }
 }
 
@@ -876,6 +882,7 @@ static int pinnacle_pm_action(const struct device *dev, enum pm_device_action ac
         .sensitivity = DT_INST_ENUM_IDX_OR(n, sensitivity, PINNACLE_SENSITIVITY_1X),               \
         .aux_abs_code = DT_INST_PROP_OR(n, aux_abs_code, 0),                                       \
         .aux_abs_interval_ms = DT_INST_PROP(n, aux_abs_interval_ms),                               \
+        .aux_abs_on_change = DT_INST_PROP(n, aux_abs_on_change),                                   \
         .dr = GPIO_DT_SPEC_GET_OR(DT_DRV_INST(n), dr_gpios, {}),                                   \
     };                                                                                             \
     PM_DEVICE_DT_INST_DEFINE(n, pinnacle_pm_action);                                               \

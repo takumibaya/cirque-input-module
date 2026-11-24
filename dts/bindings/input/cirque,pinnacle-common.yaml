@@ -48,6 +48,11 @@ properties:
     description: |
       Minimum time between two aux-abs-code events (0 = every touching sample). The first
       sample of each contact is always reported.
+  aux-abs-on-change:
+    type: boolean
+    description: |
+      Skip an aux-abs-code event whose scaled position equals the last one sent (a resting
+      finger then adds no traffic). The first sample of each contact is always reported.
   absolute-mode-scale-to-width:
     type: int
     default: 1024

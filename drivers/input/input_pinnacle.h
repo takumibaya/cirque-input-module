@@ -80,6 +80,7 @@ struct pinnacle_data {
     int8_t num_z_idle;
     bool touch_active; // latched touch state: true between BTN_TOUCH press and release
     int16_t last_x, last_y; // last abs reading
+    uint32_t aux_last_ms; // uptime of the last auxiliary coordinate report
 
     const struct device *dev;
     struct gpio_callback gpio_cb;
@@ -111,6 +112,7 @@ struct pinnacle_config {
     enum pinnacle_sensitivity sensitivity;
     uint8_t x_axis_z_min, y_axis_z_min;
     uint16_t absolute_mode_scale_to_width, absolute_mode_scale_to_height, absolute_mode_clamp_min_x, absolute_mode_clamp_max_x, absolute_mode_clamp_min_y, absolute_mode_clamp_max_y;
+    uint16_t aux_abs_code, aux_abs_interval_ms; // aux-abs-code 0 = no auxiliary coordinates
     const struct gpio_dt_spec dr;
 };
 

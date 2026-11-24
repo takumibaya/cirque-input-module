@@ -316,6 +316,24 @@ static void pinnacle_send_rel(const struct device *dev, int8_t dx, int8_t dy) {
     }
 }
 
+// Clamp an absolute reading to the configured active area and scale it to
+// [0, absolute-mode-scale-to-width] x [0, absolute-mode-scale-to-height].
+static void pinnacle_scale_abs(const struct pinnacle_config *config, int16_t *x, int16_t *y) {
+    if (*x < config->absolute_mode_clamp_min_x) {
+        *x = config->absolute_mode_clamp_min_x;
+    } else if (*x > config->absolute_mode_clamp_max_x) {
+        *x = config->absolute_mode_clamp_max_x;
+    }
+    if (*y < config->absolute_mode_clamp_min_y) {
+        *y = config->absolute_mode_clamp_min_y;
+    } else if (*y > config->absolute_mode_clamp_max_y) {
+        *y = config->absolute_mode_clamp_max_y;
+    }
+
+    *x = ((*x - config->absolute_mode_clamp_min_x) * config->absolute_mode_scale_to_width) / (config->absolute_mode_clamp_max_x - config->absolute_mode_clamp_min_x);
+    *y = ((*y - config->absolute_mode_clamp_min_y) * config->absolute_mode_scale_to_height) / (config->absolute_mode_clamp_max_y - config->absolute_mode_clamp_min_y);
+}
+
 static void pinnacle_send_abs(const struct device *dev) {
     const struct pinnacle_config *config = dev->config;
     struct pinnacle_data *data = dev->data;
@@ -340,26 +358,35 @@ static void pinnacle_send_abs(const struct device *dev) {
     data->btn_cache = btn;
 
     if (z > 0) {
-        if (x < config->absolute_mode_clamp_min_x) {
-            x = config->absolute_mode_clamp_min_x;
-        } else if (x > config->absolute_mode_clamp_max_x) {
-            x = config->absolute_mode_clamp_max_x;
-        }
-        if (y < config->absolute_mode_clamp_min_y) {
-            y = config->absolute_mode_clamp_min_y;
-        } else if (y > config->absolute_mode_clamp_max_y) {
-            y = config->absolute_mode_clamp_max_y;
-        }
-
-        // scale to be in the configured interval
-        x = ((x - config->absolute_mode_clamp_min_x) * config->absolute_mode_scale_to_width) / (config->absolute_mode_clamp_max_x - config->absolute_mode_clamp_min_x);
-        y = ((y - config->absolute_mode_clamp_min_y) * config->absolute_mode_scale_to_height) / (config->absolute_mode_clamp_max_y - config->absolute_mode_clamp_min_y);
+        pinnacle_scale_abs(config, &x, &y);
 
         input_report_abs(dev, INPUT_ABS_X, x, false, K_NO_WAIT);
         input_report_abs(dev, INPUT_ABS_Y, y, true, K_NO_WAIT);
     }
 
     return;
+}
+
+// abs-rel mode with aux-abs-code: after the REL frame of a touching sample, report the
+// same sample's scaled position as one EV_ABS event, value = x | (y << 11), sync = false.
+// The first sample of a contact is always sent, later ones at most every
+// aux-abs-interval-ms. A failed (queue full) report is retried with the next sample.
+static void pinnacle_send_aux(const struct device *dev, bool contact_start) {
+    const struct pinnacle_config *config = dev->config;
+    struct pinnacle_data *data = dev->data;
+    const uint32_t now = k_uptime_get_32();
+
+    if (!contact_start && now - data->aux_last_ms < config->aux_abs_interval_ms) {
+        return;
+    }
+
+    int16_t x = data->last_x;
+    int16_t y = data->last_y;
+    pinnacle_scale_abs(config, &x, &y);
+
+    if (input_report_abs(dev, config->aux_abs_code, x | (y << 11), false, K_NO_WAIT) == 0) {
+        data->aux_last_ms = now;
+    }
 }
 
 static int pinnacle_read_abs(const struct device *dev) {
@@ -419,7 +446,11 @@ static void pinnacle_report_data_abs_rel(const struct device *dev) {
         dx /= config->abs_rel_divisor;
         dy /= config->abs_rel_divisor;
 
+        const bool was_touching = data->touch_active;
         pinnacle_send_rel(dev, (int8_t) dx, (int8_t) dy);
+        if (config->aux_abs_code && data->last_z > 0) {
+            pinnacle_send_aux(dev, !was_touching);
+        }
     } else {
         // Ensure interrupt is re-enabled on error to prevent deadlock
         pinnacle_clear_status(dev);
@@ -809,6 +840,13 @@ static int pinnacle_pm_action(const struct device *dev, enum pm_device_action ac
 #endif // IS_ENABLED(CONFIG_PM_DEVICE)
 
 #define PINNACLE_INST(n)                                                                           \
+    BUILD_ASSERT(!DT_INST_PROP_OR(n, aux_abs_code, 0) ||                                           \
+                     (DT_INST_PROP(n, abs_rel_divisor) && !DT_INST_PROP(n, absolute_mode)),        \
+                 "aux-abs-code needs abs-rel mode (abs-rel-divisor, no absolute-mode)");          \
+    BUILD_ASSERT(!DT_INST_PROP_OR(n, aux_abs_code, 0) ||                                           \
+                     (DT_INST_PROP(n, absolute_mode_scale_to_width) < 2048 &&                      \
+                      DT_INST_PROP(n, absolute_mode_scale_to_height) < 2048),                      \
+                 "aux-abs packs 11-bit coordinates");                                             \
     static struct pinnacle_data pinnacle_data_##n;                                                 \
     static const struct pinnacle_config pinnacle_config_##n = {                                    \
         COND_CODE_1(DT_INST_ON_BUS(n, i2c),                                                        \
@@ -836,6 +874,8 @@ static int pinnacle_pm_action(const struct device *dev, enum pm_device_action ac
         .x_axis_z_min = DT_INST_PROP_OR(n, x_axis_z_min, 5),                                       \
         .y_axis_z_min = DT_INST_PROP_OR(n, y_axis_z_min, 4),                                       \
         .sensitivity = DT_INST_ENUM_IDX_OR(n, sensitivity, PINNACLE_SENSITIVITY_1X),               \
+        .aux_abs_code = DT_INST_PROP_OR(n, aux_abs_code, 0),                                       \
+        .aux_abs_interval_ms = DT_INST_PROP(n, aux_abs_interval_ms),                               \
         .dr = GPIO_DT_SPEC_GET_OR(DT_DRV_INST(n), dr_gpios, {}),                                   \
     };                                                                                             \
     PM_DEVICE_DT_INST_DEFINE(n, pinnacle_pm_action);                                               \

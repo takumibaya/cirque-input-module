@@ -34,6 +34,20 @@ properties:
     type: int
     description: If non zero, uses pad in absmode, but sends relative events (and touch press/release)
     default: 0
+  aux-abs-code:
+    type: int
+    description: |
+      abs-rel mode only. When set (non-zero), the REL frame of every touching sample is
+      followed by one EV_ABS event with this code: the same sample's position, clamped and
+      scaled like absolute mode, packed as value = x | (y << 11), sync = false. The REL,
+      BTN_TOUCH and button output, its order and sync flags are unchanged. Listeners that
+      ignore unknown ABS codes are unaffected.
+  aux-abs-interval-ms:
+    type: int
+    default: 0
+    description: |
+      Minimum time between two aux-abs-code events (0 = every touching sample). The first
+      sample of each contact is always reported.
   absolute-mode-scale-to-width:
     type: int
     default: 1024
